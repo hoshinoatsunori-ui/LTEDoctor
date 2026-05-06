@@ -1,0 +1,93 @@
+# LTE診断 相関ルール定義
+# Rev 1.0  (CLAUDE.md 設計書 Rev1.0 に準拠)
+#
+# フィールド説明:
+#   id          : ルールID
+#   description : 説明
+#   trigger     : 起動条件
+#     event     : イベント種別 (EVT_*)
+#     match_at  : AT rawテキストの部分一致 (省略可)
+#     match_chip: chipset メッセージの部分一致 (省略可)
+#     count     : 同一イベントが window_ms 内に count 回 → 集約モード
+#     window_ms : カウントウィンドウ [ms]
+#   conditions  : リスト。全条件 AND 評価
+#     source    : "at" / "chipset" / "pcap" / "any"
+#     match     : rawテキストまたはサマリーの部分一致（省略可）
+#     event     : 照合するイベント種別（省略可）
+#     within_ms : トリガー前後の許容時間窓 [ms]
+#     absent    : true = "within_ms 内に match するレコードが 存在しない" を条件とする
+#   severity    : "critical" / "high" / "medium" / "low" / "info"
+#   diagnosis   : 診断メッセージ
+
+rules:
+
+  - id: R-001
+    description: "切断時にNAS Attach Acceptなし（ネットワーク起因の疑い）"
+    trigger:
+      event: EVT_DETACH
+    conditions:
+      - source: pcap
+        match: "Attach Accept"
+        within_ms: 5000
+        absent: true
+    severity: high
+    diagnosis: "切断: ネットワーク起因の疑い（NAS Attach Acceptなし）"
+
+  - id: R-002
+    description: "ATコマンドタイムアウト連続"
+    trigger:
+      event: EVT_TIMEOUT
+      count: 3
+      window_ms: 30000
+    conditions: []
+    severity: high
+    diagnosis: "ATコマンドが30秒内に3回タイムアウト → UART通信障害の疑い"
+
+  - id: R-003
+    description: "PDN接続エラー（+KCNX_IND cause≠0）"
+    trigger:
+      event: EVT_PDN_ERROR
+    conditions: []
+    severity: high
+    diagnosis: "PDN接続エラー: +KCNX_IND の cause コードを確認してください"
+
+  - id: R-004
+    description: "LTE登録成功後すぐに切断（不安定な電波）"
+    trigger:
+      event: EVT_ATTACH
+    conditions:
+      - source: at
+        event: EVT_DETACH
+        within_ms: 120000
+    severity: medium
+    diagnosis: "接続成功後 2分以内に切断 → 電波品質または移動体通信ネットワーク不安定の疑い"
+
+  - id: R-005
+    description: "Attach Reject受信（EMM cause付き）"
+    trigger:
+      event: EVT_NWREJECT
+    conditions: []
+    severity: critical
+    diagnosis: "ネットワークから Attach Reject を受信 → EMM cause コードを確認してください"
+
+  - id: R-006
+    description: "モジュールリセット多発"
+    trigger:
+      event: EVT_RESET
+      count: 3
+      window_ms: 300000
+    conditions: []
+    severity: high
+    diagnosis: "5分以内に3回以上のモジュールリセット → 電源品質またはファームウェアの問題"
+
+  - id: R-007
+    description: "パケット送信後にRXなし（一方向通信）"
+    trigger:
+      event: EVT_TX
+    conditions:
+      - source: any
+        event: EVT_RX
+        within_ms: 10000
+        absent: true
+    severity: medium
+    diagnosis: "送信後 10秒以内に受信なし → サーバー無応答または中継ロスの疑い"

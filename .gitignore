@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 実ログファイル（個人情報・機密情報を含む可能性）
+logs/
+
+# DB（生成物）
+*.sqlite
+*.db
+
+# 環境
+.env
+.venv/
+venv/
