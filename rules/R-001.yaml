@@ -1,0 +1,11 @@
+id: R-001
+description: "切断時にNAS Attach Acceptなし（ネットワーク起因の疑い）"
+trigger:
+  event: EVT_DETACH
+conditions:
+  - source: pcap
+    match: Attach Accept
+    within_ms: 5000
+    absent: true
+severity: high
+diagnosis: "切断: ネットワーク起因の疑い（NAS Attach Acceptなし）"

@@ -1,0 +1,11 @@
+id: R-007
+description: "パケット送信後にRXなし（一方向通信）"
+trigger:
+  event: EVT_TX
+conditions:
+  - source: any
+    event: EVT_RX
+    within_ms: 10000
+    absent: true
+severity: medium
+diagnosis: "送信後 10秒以内に受信なし → サーバー無応答または中継ロスの疑い"

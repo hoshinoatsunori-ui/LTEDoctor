@@ -1,0 +1,7 @@
+id: R-005
+description: "Attach Reject受信（EMM cause付き）"
+trigger:
+  event: EVT_NWREJECT
+conditions: []
+severity: critical
+diagnosis: "ネットワークから Attach Reject を受信 → EMM cause コードを確認してください"

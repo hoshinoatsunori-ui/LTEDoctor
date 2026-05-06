@@ -1,0 +1,10 @@
+id: R-004
+description: "LTE登録成功後すぐに切断（不安定な電波）"
+trigger:
+  event: EVT_ATTACH
+conditions:
+  - source: at
+    event: EVT_DETACH
+    within_ms: 120000
+severity: medium
+diagnosis: "接続成功後 2分以内に切断 → 電波品質または移動体通信ネットワーク不安定の疑い"

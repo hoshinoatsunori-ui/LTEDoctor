@@ -1,85 +1,249 @@
 {% extends "rule_builder/base.html" %}
-{% block title %}ルール一覧 - LTE DiagRule Builder{% endblock %}
+{% block title %}LTE DiagRule Builder{% endblock %}
 
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h4 class="mb-0"><i class="bi bi-shield-check me-2"></i>相関ルール一覧
-    <span class="badge bg-secondary ms-1">{{ rules|length }}</span>
-  </h4>
-  <div class="d-flex gap-2">
-    <span id="db-status" class="badge bg-secondary">DB 確認中...</span>
-    <a href="{{ url_for('rule_new') }}" class="btn btn-success btn-sm">
-      <i class="bi bi-plus-lg me-1"></i>ルール追加
-    </a>
-  </div>
-</div>
+<!-- ナビゲーションタブ -->
+<ul class="nav nav-tabs mb-3" id="mainTabs" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button class="nav-link active" id="tab-rules-btn"
+            data-bs-toggle="tab" data-bs-target="#tab-rules"
+            type="button" role="tab">
+      <i class="bi bi-shield-check me-1"></i>ルール一覧
+      <span class="badge bg-secondary ms-1" id="rules-count-badge">{{ rules|length }}</span>
+    </button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="tab-ai-btn"
+            data-bs-toggle="tab" data-bs-target="#tab-ai"
+            type="button" role="tab">
+      <i class="bi bi-stars me-1"></i>AI 生成
+    </button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="tab-import-btn"
+            data-bs-toggle="tab" data-bs-target="#tab-import"
+            type="button" role="tab">
+      <i class="bi bi-upload me-1"></i>YAML インポート
+    </button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="tab-export-btn"
+            data-bs-toggle="tab" data-bs-target="#tab-export"
+            type="button" role="tab" onclick="loadExport()">
+      <i class="bi bi-download me-1"></i>エクスポート
+    </button>
+  </li>
+</ul>
 
-{% if not rules %}
-<div class="alert alert-info">
-  ルールがありません。<a href="{{ url_for('rule_new') }}">最初のルールを追加</a>してください。
-</div>
-{% else %}
-<div class="card shadow-sm">
-  <div class="table-responsive">
-    <table class="table table-hover align-middle mb-0">
-      <thead class="table-dark">
-        <tr>
-          <th style="width:6rem">ID</th>
-          <th>説明</th>
-          <th style="width:7rem">重要度</th>
-          <th style="width:12rem">トリガー</th>
-          <th style="width:7rem" class="text-center">マッチ数</th>
-          <th style="width:11rem" class="text-end">操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for r in rules %}
-        <tr id="row-{{ r.id }}">
-          <td><code>{{ r.id }}</code></td>
-          <td>{{ r.description }}</td>
-          <td>
-            <span class="badge severity-{{ r.severity }}">{{ r.severity.upper() }}</span>
-          </td>
-          <td>
-            <small class="text-muted">{{ r.trigger.event }}</small>
-            {% if r.trigger.get('count', 1) > 1 %}
-              <span class="badge bg-light text-dark border ms-1">×{{ r.trigger.count }}</span>
-            {% endif %}
-          </td>
-          <td class="text-center">
-            <span class="badge bg-primary match-badge" id="match-{{ r.id }}">-</span>
-          </td>
-          <td class="text-end">
-            <div class="btn-group btn-group-sm">
-              <a href="{{ url_for('rule_edit', rule_id=r.id) }}"
-                 class="btn btn-outline-primary" title="編集">
-                <i class="bi bi-pencil"></i>
-              </a>
-              <button class="btn btn-outline-info" title="テスト実行"
-                      onclick="testRule('{{ r.id }}')">
-                <i class="bi bi-play-circle"></i>
-              </button>
-              <button class="btn btn-outline-danger" title="削除"
-                      onclick="deleteRule('{{ r.id }}', '{{ r.description|replace("'","\\'")|truncate(30) }}')">
-                <i class="bi bi-trash"></i>
-              </button>
+<div class="tab-content">
+
+  <!-- ①  ルール一覧 ─────────────────────────────────────────── -->
+  <div class="tab-pane fade show active" id="tab-rules" role="tabpanel">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <span id="db-status" class="badge bg-secondary">DB 確認中...</span>
+      <a href="{{ url_for('rule_new') }}" class="btn btn-success btn-sm">
+        <i class="bi bi-plus-lg me-1"></i>新規ルール
+      </a>
+    </div>
+
+    {% if not rules %}
+    <div class="alert alert-info">
+      ルールがありません。<a href="{{ url_for('rule_new') }}">新規ルール</a>を作成するか、
+      <button type="button" class="btn btn-link btn-sm p-0 align-baseline"
+              onclick="bootstrap.Tab.getOrCreateInstance(document.getElementById('tab-ai-btn')).show()">
+        AI生成
+      </button>・
+      <button type="button" class="btn btn-link btn-sm p-0 align-baseline"
+              onclick="bootstrap.Tab.getOrCreateInstance(document.getElementById('tab-import-btn')).show()">
+        YAMLインポート
+      </button>タブをお試しください。
+    </div>
+    {% else %}
+    <div class="card shadow-sm">
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead class="table-dark">
+            <tr>
+              <th class="col-id">ID</th>
+              <th>説明</th>
+              <th class="col-sev">重要度</th>
+              <th class="col-trigger">トリガー</th>
+              <th class="col-cond text-center">条件数</th>
+              <th class="col-match text-center">マッチ数</th>
+              <th class="col-ops text-end">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in rules %}
+            <tr id="row-{{ r.id }}">
+              <td><code>{{ r.id }}</code></td>
+              <td>{{ r.description }}</td>
+              <td>
+                <span class="badge severity-{{ r.severity }}">{{ r.severity.upper() }}</span>
+              </td>
+              <td>
+                <small class="text-muted">{{ r.trigger.event }}</small>
+                {% if r.trigger.get('count', 1) > 1 %}
+                  <span class="badge bg-light text-dark border ms-1">×{{ r.trigger.count }}</span>
+                {% endif %}
+              </td>
+              <td class="text-center">
+                <span class="badge bg-secondary">{{ (r.conditions or [])|length }}</span>
+              </td>
+              <td class="text-center">
+                <span class="badge bg-primary" id="match-{{ r.id }}">-</span>
+              </td>
+              <td class="text-end">
+                <div class="btn-group btn-group-sm">
+                  <a href="{{ url_for('rule_edit', rule_id=r.id) }}"
+                     class="btn btn-outline-primary" title="編集">
+                    <i class="bi bi-pencil"></i>
+                  </a>
+                  <button type="button" class="btn btn-outline-info" title="テスト"
+                          onclick="testRule('{{ r.id }}')">
+                    <i class="bi bi-play-circle"></i>
+                  </button>
+                  <button type="button" class="btn btn-outline-danger" title="削除"
+                          onclick="deleteRule('{{ r.id }}', '{{ r.description|replace("'","\\'")|truncate(30) }}')">
+                    <i class="bi bi-trash"></i>
+                  </button>
+                </div>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+  </div><!-- /tab-rules -->
+
+  <!-- ②  AI 生成 ──────────────────────────────────────────────── -->
+  <div class="tab-pane fade" id="tab-ai" role="tabpanel">
+    <div class="row g-3">
+
+      <!-- 入力カラム -->
+      <div class="col-lg-6">
+        <div class="card shadow-sm">
+          <div class="card-header bg-dark text-white fw-semibold">
+            <i class="bi bi-stars me-2"></i>自然言語でルールの意図を入力
+          </div>
+          <div class="card-body">
+            <!-- 例文ボタン -->
+            <div class="mb-2 d-flex flex-wrap gap-1 align-items-center">
+              <span class="small text-muted">例文:</span>
+              <button type="button" class="btn btn-outline-secondary btn-sm" onclick="setAiExample(0)">リセット多発</button>
+              <button type="button" class="btn btn-outline-secondary btn-sm" onclick="setAiExample(1)">PDNエラー後に再接続なし</button>
+              <button type="button" class="btn btn-outline-secondary btn-sm" onclick="setAiExample(2)">接続直後に切断</button>
+              <button type="button" class="btn btn-outline-secondary btn-sm" onclick="setAiExample(3)">TX後RXなし</button>
             </div>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</div>
-{% endif %}
+            <textarea id="ai-prompt" class="form-control" rows="7"
+                      placeholder="例: モジュールが5分以内に3回以上リセットしたら high で検知し、電源品質を疑うルールを作って"></textarea>
+            <button type="button" class="btn btn-primary mt-3 w-100" onclick="generateAiRule()" id="ai-gen-btn">
+              <i class="bi bi-stars me-2"></i>Claude API でルール生成
+            </button>
+            <div id="ai-error" class="alert alert-danger mt-2 d-none small"></div>
+          </div>
+        </div>
+      </div>
 
-<!-- テスト結果モーダル -->
+      <!-- YAML プレビューカラム -->
+      <div class="col-lg-6">
+        <div class="card shadow-sm h-100">
+          <div class="card-header bg-dark text-white fw-semibold d-flex justify-content-between align-items-center">
+            YAML プレビュー
+            <button type="button" class="btn btn-sm btn-outline-success d-none" id="ai-add-btn"
+                    onclick="addAiRule()">
+              <i class="bi bi-plus-lg me-1"></i>ルール一覧に追加
+            </button>
+          </div>
+          <div class="card-body p-2">
+            <div class="yaml-preview yaml-preview-ai" id="ai-yaml-preview">（生成後ここに表示されます）</div>
+          </div>
+          <div class="card-footer small text-muted">
+            <i class="bi bi-info-circle me-1"></i>
+            生成されたルールは「ルール一覧に追加」で <code>rules/</code> に保存されます。編集は一覧タブから行えます。
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div><!-- /tab-ai -->
+
+  <!-- ③  YAML インポート ──────────────────────────────────────── -->
+  <div class="tab-pane fade" id="tab-import" role="tabpanel">
+    <div class="row g-3">
+      <div class="col-lg-7">
+        <div class="card shadow-sm">
+          <div class="card-header bg-dark text-white fw-semibold">
+            <i class="bi bi-upload me-2"></i>YAML 貼り付けインポート
+          </div>
+          <div class="card-body">
+            <p class="small text-muted mb-2">
+              <code>rules:</code> リスト形式・単一ルール dict・ルールリスト（<code>-</code> 始まり）のいずれでも受け付けます。<br>
+              同じ ID のルールは上書きせずスキップされます。
+            </p>
+            <textarea id="import-yaml" class="form-control font-monospace" rows="14"
+                      placeholder="rules:
+  - id: R-010
+    description: &quot;カスタムルール&quot;
+    trigger:
+      event: EVT_DETACH
+    conditions: []
+    severity: high
+    diagnosis: &quot;診断メッセージ&quot;"></textarea>
+            <button type="button" class="btn btn-primary mt-2" onclick="doImport()">
+              <i class="bi bi-upload me-1"></i>インポート実行
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-5">
+        <div class="card shadow-sm">
+          <div class="card-header bg-dark text-white fw-semibold">インポート結果</div>
+          <div class="card-body" id="import-result">
+            <p class="text-muted small">インポート後ここに結果が表示されます</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div><!-- /tab-import -->
+
+  <!-- ④  エクスポート ─────────────────────────────────────────── -->
+  <div class="tab-pane fade" id="tab-export" role="tabpanel">
+    <div class="card shadow-sm">
+      <div class="card-header bg-dark text-white fw-semibold d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-download me-2"></i>全ルール — 統合 YAML エクスポート</span>
+        <div class="d-flex gap-2">
+          <button type="button" class="btn btn-sm btn-outline-light" onclick="copyExport()">
+            <i class="bi bi-clipboard me-1"></i>コピー
+          </button>
+          <button type="button" class="btn btn-sm btn-outline-light" onclick="loadExport()">
+            <i class="bi bi-arrow-clockwise me-1"></i>更新
+          </button>
+        </div>
+      </div>
+      <div class="card-body p-2">
+        <div class="yaml-preview yaml-preview-export" id="export-yaml">（読み込み中...）</div>
+      </div>
+      <div class="card-footer small text-muted">
+        <i class="bi bi-info-circle me-1"></i>
+        このYAMLを <code>rules.yaml</code> として保存すると
+        <code>run_pipeline.py</code> / <code>event_correlator.py</code> でそのまま使用できます。
+      </div>
+    </div>
+  </div><!-- /tab-export -->
+
+</div><!-- /tab-content -->
+
+
+<!-- ─── テスト結果モーダル ────────────────────────────────────────── -->
 <div class="modal fade" id="testModal" tabindex="-1">
   <div class="modal-dialog modal-xl">
     <div class="modal-content">
       <div class="modal-header bg-dark text-white">
         <h5 class="modal-title"><i class="bi bi-play-circle me-2"></i>テスト結果</h5>
-        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="閉じる"></button>
       </div>
       <div class="modal-body" id="testModalBody">
         <div class="text-center py-4">
@@ -91,19 +255,19 @@
   </div>
 </div>
 
-<!-- 削除確認モーダル -->
+<!-- ─── 削除確認モーダル ──────────────────────────────────────────── -->
 <div class="modal fade" id="deleteModal" tabindex="-1">
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
         <h5 class="modal-title text-danger"><i class="bi bi-trash me-2"></i>ルール削除</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="閉じる"></button>
       </div>
       <div class="modal-body">
-        <p id="deleteMsg">このルールを削除しますか？</p>
+        <p id="deleteMsg"></p>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
         <form id="deleteForm" method="post">
           <button type="submit" class="btn btn-danger">削除</button>
         </form>
@@ -115,16 +279,16 @@
 
 {% block scripts %}
 <script>
-// DB ステータスとマッチ件数取得
+// ─── DB ステータス & マッチ件数 ─────────────────────────────────────────
 fetch('/api/rules')
   .then(r => r.json())
   .then(data => {
     const st = document.getElementById('db-status');
     if (data.db_available) {
-      st.textContent = 'DB: ' + data.db_path.split('/').pop().split('\\').pop();
+      st.textContent = 'DB: ' + data.db_path.split(/[/\\]/).pop();
       st.className = 'badge bg-success';
     } else {
-      st.textContent = 'DB なし';
+      st.textContent = 'DB なし（run_pipeline.py を先に実行してください）';
       st.className = 'badge bg-warning text-dark';
     }
     (data.rules || []).forEach(r => {
@@ -136,7 +300,7 @@ fetch('/api/rules')
     document.getElementById('db-status').textContent = 'API エラー';
   });
 
-// ルールテスト
+// ─── ルールテスト ────────────────────────────────────────────────────────
 function testRule(ruleId) {
   const modal = new bootstrap.Modal(document.getElementById('testModal'));
   document.getElementById('testModalBody').innerHTML = `
@@ -147,46 +311,238 @@ function testRule(ruleId) {
   modal.show();
   fetch('/rules/' + ruleId + '/test', { method: 'POST' })
     .then(r => r.json())
-    .then(data => {
-      let html = '';
-      if (data.error) {
-        html = `<div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i>${data.error}</div>`;
-      } else if (!data.results || data.results.length === 0) {
-        html = `<div class="alert alert-secondary">マッチなし（現在の DB に該当イベントがありません）</div>`;
-      } else {
-        html = `<p class="fw-bold">${data.results.length} 件マッチ</p>
-          <div class="table-responsive">
-          <table class="table table-sm table-bordered">
-            <thead class="table-dark"><tr>
-              <th>発生時刻</th><th>ソース</th><th>トリガー</th><th>信頼度</th><th>根拠</th>
-            </tr></thead><tbody>`;
-        data.results.forEach(r => {
-          const ev = (r.evidence || []).slice(1).map(e =>
-            `<li class="small">${e}</li>`).join('');
-          html += `<tr>
-            <td><code>${r.trigger_ts.substring(0,19)}</code></td>
-            <td><span class="badge bg-secondary">${r.trigger_source}</span></td>
-            <td class="small">${r.trigger_raw}</td>
-            <td><span class="badge bg-${r.confidence==='HIGH'?'success':'warning text-dark'}">${r.confidence}</span></td>
-            <td><ul class="mb-0 ps-3">${ev}</ul></td>
-          </tr>`;
-        });
-        html += '</tbody></table></div>';
-      }
-      document.getElementById('testModalBody').innerHTML = html;
-    })
+    .then(renderTestResult)
     .catch(e => {
       document.getElementById('testModalBody').innerHTML =
         `<div class="alert alert-danger">通信エラー: ${e}</div>`;
     });
 }
 
-// ルール削除
+function renderTestResult(data) {
+  let html = '';
+  if (data.error) {
+    html = `<div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i>${data.error}</div>`;
+  } else if (!data.results || data.results.length === 0) {
+    html = `<div class="alert alert-secondary">マッチなし（現在の DB に該当イベントがありません）</div>`;
+  } else {
+    html = `<p class="fw-bold">${data.results.length} 件マッチ</p>
+      <div class="table-responsive">
+      <table class="table table-sm table-bordered">
+        <thead class="table-dark"><tr>
+          <th>発生時刻</th><th>ソース</th><th>トリガー</th><th>信頼度</th><th>根拠</th>
+        </tr></thead><tbody>`;
+    data.results.forEach(r => {
+      const ev = (r.evidence || []).slice(1).map(e =>
+        `<li class="small text-break">${escHtml(e)}</li>`).join('');
+      html += `<tr>
+        <td><code>${r.trigger_ts.substring(0,19)}</code></td>
+        <td><span class="badge bg-secondary">${r.trigger_source}</span></td>
+        <td class="small text-break">${escHtml(r.trigger_raw)}</td>
+        <td><span class="badge bg-${r.confidence==='HIGH'?'success':'warning text-dark'}">${r.confidence}</span></td>
+        <td><ul class="mb-0 ps-3">${ev}</ul></td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+  }
+  document.getElementById('testModalBody').innerHTML = html;
+}
+
+// ─── ルール削除 ──────────────────────────────────────────────────────────
 function deleteRule(ruleId, desc) {
   document.getElementById('deleteMsg').textContent =
     `「${desc}」(${ruleId}) を削除しますか？この操作は元に戻せません。`;
   document.getElementById('deleteForm').action = '/rules/' + ruleId + '/delete';
   new bootstrap.Modal(document.getElementById('deleteModal')).show();
+}
+
+// ─── AI 生成 ─────────────────────────────────────────────────────────────
+const AI_EXAMPLES = [
+  'モジュールが5分以内に3回以上リセットしたら、電源品質の問題として高優先度で検知してください',
+  'PDN接続エラー（EVT_PDN_ERROR）が発生した後、30秒以内に再接続（EVT_ATTACH）がない場合を medium で検知してください',
+  'LTE 接続成功（EVT_ATTACH）後、30秒以内に切断（EVT_DETACH）が発生するケースを high で検知してください',
+  'パケット送信（EVT_TX）後、10秒以内に受信（EVT_RX）がない一方向通信を medium で検知してください',
+];
+
+function setAiExample(idx) {
+  document.getElementById('ai-prompt').value = AI_EXAMPLES[idx];
+}
+
+let _aiRule = null;
+
+function generateAiRule() {
+  const prompt = document.getElementById('ai-prompt').value.trim();
+  if (!prompt) return;
+  const btn = document.getElementById('ai-gen-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>生成中...';
+  document.getElementById('ai-error').classList.add('d-none');
+  document.getElementById('ai-add-btn').classList.add('d-none');
+  document.getElementById('ai-yaml-preview').textContent = '生成中...';
+
+  fetch('/api/ai_generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt }),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) {
+      document.getElementById('ai-error').textContent = data.error;
+      document.getElementById('ai-error').classList.remove('d-none');
+      document.getElementById('ai-yaml-preview').textContent = data.raw || '';
+    } else {
+      _aiRule = data.rule;
+      document.getElementById('ai-yaml-preview').textContent = ruleToYaml(data.rule);
+      document.getElementById('ai-add-btn').classList.remove('d-none');
+    }
+  })
+  .catch(e => {
+    document.getElementById('ai-error').textContent = '通信エラー: ' + e;
+    document.getElementById('ai-error').classList.remove('d-none');
+    document.getElementById('ai-yaml-preview').textContent = '';
+  })
+  .finally(() => {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-stars me-2"></i>Claude API でルール生成';
+  });
+}
+
+function addAiRule() {
+  if (!_aiRule) return;
+  fetch('/api/rules', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(_aiRule),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) {
+      const msg = Array.isArray(data.error) ? data.error.join(', ') : data.error;
+      showToast('エラー: ' + msg, 'danger');
+    } else {
+      showToast(`ルール ${data.id} をルール一覧に追加しました`, 'success');
+      document.getElementById('ai-add-btn').classList.add('d-none');
+      // バッジ件数更新
+      const badge = document.getElementById('rules-count-badge');
+      if (badge) badge.textContent = parseInt(badge.textContent || 0) + 1;
+      // 一覧タブをリロード
+      setTimeout(() => window.location.reload(), 1200);
+    }
+  })
+  .catch(e => showToast('通信エラー: ' + e, 'danger'));
+}
+
+// ─── YAML インポート ──────────────────────────────────────────────────────
+function doImport() {
+  const yaml = document.getElementById('import-yaml').value.trim();
+  if (!yaml) return;
+  fetch('/api/import_yaml', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ yaml }),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) {
+      document.getElementById('import-result').innerHTML =
+        `<div class="alert alert-danger small">${escHtml(data.error)}</div>`;
+      return;
+    }
+    let html = '';
+    if (data.added.length) {
+      html += `<div class="alert alert-success small">
+        <strong>追加 (${data.added.length} 件):</strong><br>
+        ${data.added.map(id => `<code>${id}</code>`).join(' ')}
+      </div>`;
+    }
+    if (data.skipped.length) {
+      html += `<div class="alert alert-warning small">
+        <strong>スキップ (${data.skipped.length} 件):</strong>
+        <ul class="mb-0 mt-1">
+          ${data.skipped.map(s => `<li><code>${s.id}</code>: ${escHtml(s.reason)}</li>`).join('')}
+        </ul>
+      </div>`;
+    }
+    if (!data.added.length && !data.skipped.length) {
+      html = '<p class="text-muted small">インポートするルールがありませんでした。</p>';
+    }
+    document.getElementById('import-result').innerHTML = html;
+    if (data.added.length) {
+      const badge = document.getElementById('rules-count-badge');
+      if (badge) badge.textContent = parseInt(badge.textContent || 0) + data.added.length;
+      setTimeout(() => window.location.reload(), 1500);
+    }
+  })
+  .catch(e => {
+    document.getElementById('import-result').innerHTML =
+      `<div class="alert alert-danger small">通信エラー: ${e}</div>`;
+  });
+}
+
+// ─── エクスポート ─────────────────────────────────────────────────────────
+let _exportLoaded = false;
+
+function loadExport() {
+  document.getElementById('export-yaml').textContent = '読み込み中...';
+  fetch('/api/export_yaml')
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('export-yaml').textContent = data.yaml || '';
+      _exportLoaded = true;
+    })
+    .catch(e => {
+      document.getElementById('export-yaml').textContent = 'エラー: ' + e;
+    });
+}
+
+function copyExport() {
+  const text = document.getElementById('export-yaml').textContent;
+  if (!text || text === '（読み込み中...）') { loadExport(); return; }
+  navigator.clipboard.writeText(text)
+    .then(() => showToast('クリップボードにコピーしました', 'success'))
+    .catch(() => showToast('コピーに失敗しました', 'danger'));
+}
+
+// エクスポートタブが表示されたとき自動ロード
+document.getElementById('tab-export-btn').addEventListener('show.bs.tab', () => {
+  if (!_exportLoaded) loadExport();
+});
+
+// ─── ユーティリティ ──────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function ruleToYaml(rule) {
+  const lines = [];
+  lines.push(`id: ${rule.id}`);
+  lines.push(`description: "${(rule.description||'').replace(/"/g,'\\"')}"`);
+  lines.push(`trigger:`);
+  lines.push(`  event: ${rule.trigger.event}`);
+  if ((rule.trigger.count||1) > 1) {
+    lines.push(`  count: ${rule.trigger.count}`);
+    lines.push(`  window_ms: ${rule.trigger.window_ms||0}`);
+  }
+  if (rule.trigger.match_at) lines.push(`  match_at: "${rule.trigger.match_at}"`);
+  lines.push(`conditions:`);
+  if (!rule.conditions || rule.conditions.length === 0) {
+    lines.push(`  []`);
+  } else {
+    rule.conditions.forEach(c => {
+      lines.push(`  - source: ${c.source||'any'}`);
+      if (c.event) lines.push(`    event: ${c.event}`);
+      if (c.match) lines.push(`    match: "${c.match}"`);
+      lines.push(`    within_ms: ${c.within_ms||5000}`);
+      if (c.absent) lines.push(`    absent: true`);
+    });
+  }
+  lines.push(`severity: ${rule.severity||'high'}`);
+  lines.push(`diagnosis: "${(rule.diagnosis||'').replace(/"/g,'\\"')}"`);
+  return lines.join('\n');
 }
 </script>
 {% endblock %}

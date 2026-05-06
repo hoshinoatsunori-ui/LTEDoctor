@@ -1,0 +1,7 @@
+id: R-003
+description: "PDN接続エラー（+KCNX_IND cause≠0）"
+trigger:
+  event: EVT_PDN_ERROR
+conditions: []
+severity: high
+diagnosis: "PDN接続エラー: +KCNX_IND の cause コードを確認してください"

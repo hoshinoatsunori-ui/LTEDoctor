@@ -21,6 +21,16 @@
                     white-space: pre; overflow-x: auto; }
     .match-badge { min-width: 2rem; }
     #toast-container { position: fixed; top: 1rem; right: 1rem; z-index: 9999; }
+    /* ルール一覧テーブル列幅 */
+    .col-id      { width: 6.5rem; }
+    .col-sev     { width: 7rem; }
+    .col-trigger { width: 11rem; }
+    .col-cond    { width: 5rem; }
+    .col-match   { width: 6.5rem; }
+    .col-ops     { width: 11rem; }
+    /* YAML プレビュー高さバリアント */
+    .yaml-preview-ai     { min-height: 200px; }
+    .yaml-preview-export { min-height: 320px; }
   </style>
 </head>
 <body>
@@ -45,7 +55,7 @@
     {% for cat, msg in messages %}
       <div class="alert alert-{{ cat }} alert-dismissible fade show" role="alert">
         {{ msg }}
-        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="閉じる"></button>
       </div>
     {% endfor %}
   {% endwith %}

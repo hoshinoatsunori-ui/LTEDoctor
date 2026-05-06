@@ -1,0 +1,9 @@
+id: R-006
+description: "モジュールリセット多発"
+trigger:
+  event: EVT_RESET
+  count: 3
+  window_ms: 300000
+conditions: []
+severity: high
+diagnosis: "5分以内に3回以上のモジュールリセット → 電源品質またはファームウェアの問題"

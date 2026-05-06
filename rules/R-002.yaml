@@ -1,0 +1,9 @@
+id: R-002
+description: "ATコマンドタイムアウト連続"
+trigger:
+  event: EVT_TIMEOUT
+  count: 3
+  window_ms: 30000
+conditions: []
+severity: high
+diagnosis: "ATコマンドが30秒内に3回タイムアウト → UART通信障害の疑い"
