@@ -1,0 +1,192 @@
+{% extends "rule_builder/base.html" %}
+{% block title %}ルール一覧 - LTE DiagRule Builder{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0"><i class="bi bi-shield-check me-2"></i>相関ルール一覧
+    <span class="badge bg-secondary ms-1">{{ rules|length }}</span>
+  </h4>
+  <div class="d-flex gap-2">
+    <span id="db-status" class="badge bg-secondary">DB 確認中...</span>
+    <a href="{{ url_for('rule_new') }}" class="btn btn-success btn-sm">
+      <i class="bi bi-plus-lg me-1"></i>ルール追加
+    </a>
+  </div>
+</div>
+
+{% if not rules %}
+<div class="alert alert-info">
+  ルールがありません。<a href="{{ url_for('rule_new') }}">最初のルールを追加</a>してください。
+</div>
+{% else %}
+<div class="card shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead class="table-dark">
+        <tr>
+          <th style="width:6rem">ID</th>
+          <th>説明</th>
+          <th style="width:7rem">重要度</th>
+          <th style="width:12rem">トリガー</th>
+          <th style="width:7rem" class="text-center">マッチ数</th>
+          <th style="width:11rem" class="text-end">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rules %}
+        <tr id="row-{{ r.id }}">
+          <td><code>{{ r.id }}</code></td>
+          <td>{{ r.description }}</td>
+          <td>
+            <span class="badge severity-{{ r.severity }}">{{ r.severity.upper() }}</span>
+          </td>
+          <td>
+            <small class="text-muted">{{ r.trigger.event }}</small>
+            {% if r.trigger.get('count', 1) > 1 %}
+              <span class="badge bg-light text-dark border ms-1">×{{ r.trigger.count }}</span>
+            {% endif %}
+          </td>
+          <td class="text-center">
+            <span class="badge bg-primary match-badge" id="match-{{ r.id }}">-</span>
+          </td>
+          <td class="text-end">
+            <div class="btn-group btn-group-sm">
+              <a href="{{ url_for('rule_edit', rule_id=r.id) }}"
+                 class="btn btn-outline-primary" title="編集">
+                <i class="bi bi-pencil"></i>
+              </a>
+              <button class="btn btn-outline-info" title="テスト実行"
+                      onclick="testRule('{{ r.id }}')">
+                <i class="bi bi-play-circle"></i>
+              </button>
+              <button class="btn btn-outline-danger" title="削除"
+                      onclick="deleteRule('{{ r.id }}', '{{ r.description|replace("'","\\'")|truncate(30) }}')">
+                <i class="bi bi-trash"></i>
+              </button>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<!-- テスト結果モーダル -->
+<div class="modal fade" id="testModal" tabindex="-1">
+  <div class="modal-dialog modal-xl">
+    <div class="modal-content">
+      <div class="modal-header bg-dark text-white">
+        <h5 class="modal-title"><i class="bi bi-play-circle me-2"></i>テスト結果</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="testModalBody">
+        <div class="text-center py-4">
+          <div class="spinner-border text-primary"></div>
+          <p class="mt-2">テスト実行中...</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 削除確認モーダル -->
+<div class="modal fade" id="deleteModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title text-danger"><i class="bi bi-trash me-2"></i>ルール削除</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p id="deleteMsg">このルールを削除しますか？</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+        <form id="deleteForm" method="post">
+          <button type="submit" class="btn btn-danger">削除</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// DB ステータスとマッチ件数取得
+fetch('/api/rules')
+  .then(r => r.json())
+  .then(data => {
+    const st = document.getElementById('db-status');
+    if (data.db_available) {
+      st.textContent = 'DB: ' + data.db_path.split('/').pop().split('\\').pop();
+      st.className = 'badge bg-success';
+    } else {
+      st.textContent = 'DB なし';
+      st.className = 'badge bg-warning text-dark';
+    }
+    (data.rules || []).forEach(r => {
+      const el = document.getElementById('match-' + r.id);
+      if (el) el.textContent = r.match_count ?? '-';
+    });
+  })
+  .catch(() => {
+    document.getElementById('db-status').textContent = 'API エラー';
+  });
+
+// ルールテスト
+function testRule(ruleId) {
+  const modal = new bootstrap.Modal(document.getElementById('testModal'));
+  document.getElementById('testModalBody').innerHTML = `
+    <div class="text-center py-4">
+      <div class="spinner-border text-primary"></div>
+      <p class="mt-2">テスト実行中...</p>
+    </div>`;
+  modal.show();
+  fetch('/rules/' + ruleId + '/test', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      let html = '';
+      if (data.error) {
+        html = `<div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i>${data.error}</div>`;
+      } else if (!data.results || data.results.length === 0) {
+        html = `<div class="alert alert-secondary">マッチなし（現在の DB に該当イベントがありません）</div>`;
+      } else {
+        html = `<p class="fw-bold">${data.results.length} 件マッチ</p>
+          <div class="table-responsive">
+          <table class="table table-sm table-bordered">
+            <thead class="table-dark"><tr>
+              <th>発生時刻</th><th>ソース</th><th>トリガー</th><th>信頼度</th><th>根拠</th>
+            </tr></thead><tbody>`;
+        data.results.forEach(r => {
+          const ev = (r.evidence || []).slice(1).map(e =>
+            `<li class="small">${e}</li>`).join('');
+          html += `<tr>
+            <td><code>${r.trigger_ts.substring(0,19)}</code></td>
+            <td><span class="badge bg-secondary">${r.trigger_source}</span></td>
+            <td class="small">${r.trigger_raw}</td>
+            <td><span class="badge bg-${r.confidence==='HIGH'?'success':'warning text-dark'}">${r.confidence}</span></td>
+            <td><ul class="mb-0 ps-3">${ev}</ul></td>
+          </tr>`;
+        });
+        html += '</tbody></table></div>';
+      }
+      document.getElementById('testModalBody').innerHTML = html;
+    })
+    .catch(e => {
+      document.getElementById('testModalBody').innerHTML =
+        `<div class="alert alert-danger">通信エラー: ${e}</div>`;
+    });
+}
+
+// ルール削除
+function deleteRule(ruleId, desc) {
+  document.getElementById('deleteMsg').textContent =
+    `「${desc}」(${ruleId}) を削除しますか？この操作は元に戻せません。`;
+  document.getElementById('deleteForm').action = '/rules/' + ruleId + '/delete';
+  new bootstrap.Modal(document.getElementById('deleteModal')).show();
+}
+</script>
+{% endblock %}

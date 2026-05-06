@@ -40,14 +40,43 @@ logs/
 | `event_correlator.py` | Ph.3 | `rules.yaml` を読み込みイベント相関評価 |
 | `rules.yaml` | Ph.3 | 相関ルール定義（R-001〜R-007） |
 | `run_pipeline.py` | — | フルパイプライン実行スクリプト |
+| `rule_builder.py` | — | Flask Web UI：ルール CRUD + リアルタイムテスト |
+
+## DiagRule Builder（Flask Web UI）
+
+`rules.yaml` の相関ルールをブラウザ上で **CRUD** し、現在の `diag.sqlite` に対して**リアルタイムテスト**できるツール。
+
+### 起動
+
+```bash
+pip install flask   # 初回のみ
+python rule_builder.py
+# → http://localhost:5001/ を開く
+```
+
+オプション:
+
+```bash
+python rule_builder.py --db diag.sqlite --rules rules.yaml --port 5001
+```
+
+### 機能
+
+| 画面 | 説明 |
+|------|------|
+| ルール一覧 | ID / 説明 / Severity バッジ / Trigger / マッチ件数（DBあり時）を表示 |
+| ルール編集フォーム | 条件の動的追加・削除、YAML プレビューをリアルタイム表示 |
+| テスト実行 | 保存済みルールまたはフォーム現在値を DB に対して即時評価 |
+| JSON API | `GET /api/rules`・`GET /api/events` でデータ取得可能 |
+
+> DB が不要な場合（`diag.sqlite` なし）でも起動可能。マッチ件数は「-」表示になる。
 
 ## インストール
 
 ```bash
-pip install scapy pyyaml
+pip install scapy pyyaml flask
 # オプション: NAS 詳細解析用
 # pip install pyshark   # tshark が別途必要
-# pip install flask plotly  # Ph.6 ダッシュボード用
 ```
 
 ## 使い方

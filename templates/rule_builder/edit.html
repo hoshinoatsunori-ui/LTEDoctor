@@ -1,0 +1,414 @@
+{% extends "rule_builder/base.html" %}
+{% block title %}{{ 'ルール編集' if rule else 'ルール追加' }} - LTE DiagRule Builder{% endblock %}
+
+{% block content %}
+{% set is_new = rule is none %}
+{% set r = rule or {} %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">
+    <i class="bi bi-{{ 'plus-circle' if is_new else 'pencil-square' }} me-2"></i>
+    {{ 'ルール追加' if is_new else 'ルール編集: ' ~ r.id }}
+  </h4>
+  <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">
+    <i class="bi bi-arrow-left me-1"></i>一覧へ
+  </a>
+</div>
+
+<form method="post" action="{{ url_for('rule_create') if is_new else url_for('rule_update', rule_id=r.id) }}"
+      id="ruleForm">
+<div class="row g-3">
+
+  <!-- 左カラム: フォーム -->
+  <div class="col-lg-7">
+
+    <!-- 基本情報 -->
+    <div class="card shadow-sm mb-3">
+      <div class="card-header fw-semibold bg-dark text-white">基本情報</div>
+      <div class="card-body">
+        <div class="row g-2">
+          <div class="col-sm-4">
+            <label class="form-label">ID <span class="text-danger">*</span></label>
+            <input type="text" name="id" class="form-control font-monospace"
+                   value="{{ r.id or '' }}" placeholder="R-001" required
+                   {% if not is_new %}readonly{% endif %}>
+          </div>
+          <div class="col-sm-8">
+            <label class="form-label">説明 <span class="text-danger">*</span></label>
+            <input type="text" name="description" class="form-control"
+                   value="{{ r.description or '' }}" required>
+          </div>
+          <div class="col-sm-4">
+            <label class="form-label">重要度</label>
+            <select name="severity" class="form-select">
+              {% for sev in ['critical','high','medium','low','info'] %}
+              <option value="{{ sev }}" {{ 'selected' if (r.severity or 'high') == sev }}>
+                {{ sev.upper() }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-sm-8">
+            <label class="form-label">診断メッセージ <span class="text-danger">*</span></label>
+            <textarea name="diagnosis" class="form-control" rows="2" required>{{ r.diagnosis or '' }}</textarea>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- トリガー -->
+    <div class="card shadow-sm mb-3">
+      <div class="card-header fw-semibold bg-dark text-white">トリガー条件</div>
+      <div class="card-body">
+        <div class="row g-2">
+          <div class="col-sm-6">
+            <label class="form-label">イベント種別 <span class="text-danger">*</span></label>
+            <select name="trigger_event" class="form-select" required>
+              {% set cur_evt = r.trigger.event if r.trigger else '' %}
+              {% for evt in ['EVT_ATTACH','EVT_DETACH','EVT_TX','EVT_RX',
+                             'EVT_PDN_ERROR','EVT_NWREJECT','EVT_TIMEOUT','EVT_RESET'] %}
+              <option value="{{ evt }}" {{ 'selected' if cur_evt == evt }}>{{ evt }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-sm-3">
+            <label class="form-label">発生回数</label>
+            <input type="number" name="trigger_count" class="form-control" min="1" value="{{ r.trigger.count if r.trigger else 1 }}">
+          </div>
+          <div class="col-sm-3">
+            <label class="form-label">窓 [ms]</label>
+            <input type="number" name="trigger_window_ms" class="form-control" min="0"
+                   value="{{ r.trigger.window_ms if r.trigger else 0 }}">
+          </div>
+          <div class="col-12">
+            <label class="form-label">AT テキスト部分一致（省略可）</label>
+            <input type="text" name="trigger_match_at" class="form-control font-monospace"
+                   placeholder="+KCNX_IND"
+                   value="{{ r.trigger.match_at if r.trigger and r.trigger.match_at else '' }}">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 条件リスト -->
+    <div class="card shadow-sm mb-3">
+      <div class="card-header fw-semibold bg-dark text-white d-flex justify-content-between">
+        追加条件
+        <button type="button" class="btn btn-sm btn-outline-light" onclick="addCondition()">
+          <i class="bi bi-plus me-1"></i>条件追加
+        </button>
+      </div>
+      <div class="card-body p-2" id="conditions-container">
+        {% set conds = r.conditions if r.conditions else [] %}
+        {% if conds %}
+          {% for c in conds %}
+          <div class="condition-row border rounded p-2 mb-2 bg-white" data-idx="{{ loop.index0 }}">
+            {{ _render_condition(loop.index0, c) }}
+          </div>
+          {% endfor %}
+        {% else %}
+          <p class="text-muted small mb-0 p-1" id="no-cond-msg">条件なし（トリガーのみで評価）</p>
+        {% endif %}
+      </div>
+    </div>
+
+  </div><!-- /左カラム -->
+
+  <!-- 右カラム: YAML プレビュー -->
+  <div class="col-lg-5">
+    <div class="card shadow-sm sticky-top" style="top:1rem">
+      <div class="card-header fw-semibold bg-dark text-white d-flex justify-content-between align-items-center">
+        YAML プレビュー
+        <button type="button" class="btn btn-sm btn-outline-light" onclick="refreshPreview()">
+          <i class="bi bi-arrow-clockwise"></i>
+        </button>
+      </div>
+      <div class="card-body p-2">
+        <div class="yaml-preview" id="yamlPreview">（フォームを編集すると更新されます）</div>
+      </div>
+      <div class="card-footer d-flex gap-2 justify-content-end">
+        <a href="{{ url_for('index') }}" class="btn btn-secondary">キャンセル</a>
+        <button type="button" class="btn btn-outline-info" onclick="testCurrent()">
+          <i class="bi bi-play-circle me-1"></i>テスト実行
+        </button>
+        <button type="submit" class="btn btn-primary">
+          <i class="bi bi-save me-1"></i>保存
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+</form>
+
+<!-- テスト結果モーダル（インライン） -->
+<div class="modal fade" id="testModal" tabindex="-1">
+  <div class="modal-dialog modal-xl">
+    <div class="modal-content">
+      <div class="modal-header bg-dark text-white">
+        <h5 class="modal-title"><i class="bi bi-play-circle me-2"></i>テスト結果</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="testModalBody"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 条件行テンプレート（hidden）-->
+<template id="cond-template">
+  <div class="condition-row border rounded p-2 mb-2 bg-white" data-idx="__IDX__">
+    <div class="d-flex justify-content-between align-items-center mb-1">
+      <span class="badge bg-secondary">条件 #<span class="cond-num">?</span></span>
+      <button type="button" class="btn btn-sm btn-outline-danger" onclick="removeCondition(this)">
+        <i class="bi bi-x"></i>
+      </button>
+    </div>
+    <div class="row g-1">
+      <div class="col-sm-3">
+        <select name="cond___IDX___source" class="form-select form-select-sm">
+          <option value="at">at</option>
+          <option value="pcap">pcap</option>
+          <option value="chipset">chipset</option>
+          <option value="any" selected>any</option>
+        </select>
+      </div>
+      <div class="col-sm-4">
+        <select name="cond___IDX___event" class="form-select form-select-sm">
+          <option value="">(event 指定なし)</option>
+          <option value="EVT_ATTACH">EVT_ATTACH</option>
+          <option value="EVT_DETACH">EVT_DETACH</option>
+          <option value="EVT_TX">EVT_TX</option>
+          <option value="EVT_RX">EVT_RX</option>
+          <option value="EVT_PDN_ERROR">EVT_PDN_ERROR</option>
+          <option value="EVT_NWREJECT">EVT_NWREJECT</option>
+          <option value="EVT_TIMEOUT">EVT_TIMEOUT</option>
+          <option value="EVT_RESET">EVT_RESET</option>
+        </select>
+      </div>
+      <div class="col-sm-3">
+        <input type="number" name="cond___IDX___within_ms" class="form-control form-control-sm"
+               placeholder="within_ms" min="0" value="5000">
+      </div>
+      <div class="col-sm-2 d-flex align-items-center">
+        <div class="form-check form-switch ms-1">
+          <input class="form-check-input" type="checkbox" name="cond___IDX___absent" id="absent___IDX__">
+          <label class="form-check-label small" for="absent___IDX__">absent</label>
+        </div>
+      </div>
+      <div class="col-12">
+        <input type="text" name="cond___IDX___match" class="form-control form-control-sm font-monospace"
+               placeholder="部分一致テキスト（省略可）">
+      </div>
+    </div>
+  </div>
+</template>
+{% endblock %}
+
+{% macro _render_condition(idx, c) %}
+<div class="d-flex justify-content-between align-items-center mb-1">
+  <span class="badge bg-secondary">条件 #{{ idx + 1 }}</span>
+  <button type="button" class="btn btn-sm btn-outline-danger" onclick="removeCondition(this)">
+    <i class="bi bi-x"></i>
+  </button>
+</div>
+<div class="row g-1">
+  <div class="col-sm-3">
+    <select name="cond_{{ idx }}_source" class="form-select form-select-sm">
+      {% for s in ['at','pcap','chipset','any'] %}
+      <option value="{{ s }}" {{ 'selected' if c.source == s }}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-sm-4">
+    <select name="cond_{{ idx }}_event" class="form-select form-select-sm">
+      <option value="" {{ 'selected' if not c.event }}>(event 指定なし)</option>
+      {% for evt in ['EVT_ATTACH','EVT_DETACH','EVT_TX','EVT_RX',
+                     'EVT_PDN_ERROR','EVT_NWREJECT','EVT_TIMEOUT','EVT_RESET'] %}
+      <option value="{{ evt }}" {{ 'selected' if c.event == evt }}>{{ evt }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-sm-3">
+    <input type="number" name="cond_{{ idx }}_within_ms" class="form-control form-control-sm"
+           placeholder="within_ms" min="0" value="{{ c.within_ms or 5000 }}">
+  </div>
+  <div class="col-sm-2 d-flex align-items-center">
+    <div class="form-check form-switch ms-1">
+      <input class="form-check-input" type="checkbox" name="cond_{{ idx }}_absent"
+             id="absent_{{ idx }}" {{ 'checked' if c.absent }}>
+      <label class="form-check-label small" for="absent_{{ idx }}">absent</label>
+    </div>
+  </div>
+  <div class="col-12">
+    <input type="text" name="cond_{{ idx }}_match" class="form-control form-control-sm font-monospace"
+           placeholder="部分一致テキスト（省略可）" value="{{ c.match or '' }}">
+  </div>
+</div>
+{% endmacro %}
+
+{% block scripts %}
+<script>
+let condCount = {{ (r.conditions or [])|length }};
+
+function addCondition() {
+  const tmpl = document.getElementById('cond-template').content.cloneNode(true);
+  const idx = condCount++;
+  const div = tmpl.querySelector('.condition-row');
+  div.innerHTML = div.innerHTML.split('__IDX__').join(idx);
+  div.querySelector('.cond-num').textContent = condCount;
+  document.getElementById('no-cond-msg')?.remove();
+  document.getElementById('conditions-container').appendChild(div);
+  refreshPreview();
+}
+
+function removeCondition(btn) {
+  btn.closest('.condition-row').remove();
+  // 条件番号を再採番
+  document.querySelectorAll('.condition-row .cond-num').forEach((el, i) => {
+    el.textContent = i + 1;
+  });
+  if (!document.querySelector('.condition-row')) {
+    const p = document.createElement('p');
+    p.id = 'no-cond-msg';
+    p.className = 'text-muted small mb-0 p-1';
+    p.textContent = '条件なし（トリガーのみで評価）';
+    document.getElementById('conditions-container').appendChild(p);
+  }
+  refreshPreview();
+}
+
+function buildRuleObj() {
+  const fd = new FormData(document.getElementById('ruleForm'));
+  const rule = {
+    id: fd.get('id') || 'R-NEW',
+    description: fd.get('description') || '',
+    trigger: {
+      event: fd.get('trigger_event'),
+    },
+    conditions: [],
+    severity: fd.get('severity') || 'high',
+    diagnosis: fd.get('diagnosis') || '',
+  };
+  const cnt = parseInt(fd.get('trigger_count')) || 1;
+  if (cnt > 1) {
+    rule.trigger.count = cnt;
+    rule.trigger.window_ms = parseInt(fd.get('trigger_window_ms')) || 0;
+  }
+  const mat = fd.get('trigger_match_at');
+  if (mat) rule.trigger.match_at = mat;
+
+  // conditions
+  document.querySelectorAll('.condition-row').forEach(row => {
+    const idx = row.dataset.idx;
+    // idxを再取得（追加順の実際のname属性）
+    // name属性から idx を探す
+    const srcEl = row.querySelector('[name^="cond_"][name$="_source"]');
+    if (!srcEl) return;
+    const m = srcEl.name.match(/cond_(\d+)_source/);
+    if (!m) return;
+    const i = m[1];
+    const cond = {
+      source: fd.get(`cond_${i}_source`) || 'any',
+      within_ms: parseInt(fd.get(`cond_${i}_within_ms`)) || 5000,
+    };
+    const ev = fd.get(`cond_${i}_event`);
+    if (ev) cond.event = ev;
+    const match = fd.get(`cond_${i}_match`);
+    if (match) cond.match = match;
+    if (fd.get(`cond_${i}_absent`)) cond.absent = true;
+    rule.conditions.push(cond);
+  });
+  return rule;
+}
+
+function objToYaml(rule) {
+  // 簡易 YAML シリアライザ（PyYAML の dump に近い出力）
+  const lines = [];
+  lines.push(`- id: ${rule.id}`);
+  lines.push(`  description: "${rule.description}"`);
+  lines.push(`  trigger:`);
+  lines.push(`    event: ${rule.trigger.event}`);
+  if (rule.trigger.count > 1) {
+    lines.push(`    count: ${rule.trigger.count}`);
+    lines.push(`    window_ms: ${rule.trigger.window_ms}`);
+  }
+  if (rule.trigger.match_at) lines.push(`    match_at: "${rule.trigger.match_at}"`);
+  lines.push(`  conditions:`);
+  if (rule.conditions.length === 0) {
+    lines.push(`    []`);
+  } else {
+    rule.conditions.forEach(c => {
+      lines.push(`    - source: ${c.source}`);
+      if (c.event) lines.push(`      event: ${c.event}`);
+      if (c.match) lines.push(`      match: "${c.match}"`);
+      lines.push(`      within_ms: ${c.within_ms}`);
+      if (c.absent) lines.push(`      absent: true`);
+    });
+  }
+  lines.push(`  severity: ${rule.severity}`);
+  lines.push(`  diagnosis: "${rule.diagnosis}"`);
+  return lines.join('\n');
+}
+
+function refreshPreview() {
+  try {
+    document.getElementById('yamlPreview').textContent = objToYaml(buildRuleObj());
+  } catch(e) {}
+}
+
+// フォーム変更時にプレビュー更新
+document.getElementById('ruleForm').addEventListener('input', refreshPreview);
+refreshPreview();
+
+// テスト実行（現在のフォーム値でテスト）
+function testCurrent() {
+  const rule = buildRuleObj();
+  const modal = new bootstrap.Modal(document.getElementById('testModal'));
+  document.getElementById('testModalBody').innerHTML = `
+    <div class="text-center py-4">
+      <div class="spinner-border text-primary"></div>
+      <p class="mt-2">テスト実行中...</p>
+    </div>`;
+  modal.show();
+  fetch('/rules/_preview/test', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(rule),
+  })
+  .then(r => r.json())
+  .then(data => renderTestResult(data))
+  .catch(e => {
+    document.getElementById('testModalBody').innerHTML =
+      `<div class="alert alert-danger">通信エラー: ${e}</div>`;
+  });
+}
+
+function renderTestResult(data) {
+  let html = '';
+  if (data.error) {
+    html = `<div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i>${data.error}</div>`;
+  } else if (!data.results || data.results.length === 0) {
+    html = `<div class="alert alert-secondary">マッチなし（現在の DB に該当イベントがありません）</div>`;
+  } else {
+    html = `<p class="fw-bold">${data.results.length} 件マッチ</p>
+      <div class="table-responsive">
+      <table class="table table-sm table-bordered">
+        <thead class="table-dark"><tr>
+          <th>発生時刻</th><th>ソース</th><th>トリガー</th><th>信頼度</th><th>根拠</th>
+        </tr></thead><tbody>`;
+    data.results.forEach(r => {
+      const ev = (r.evidence || []).slice(1).map(e =>
+        `<li class="small text-break">${e}</li>`).join('');
+      html += `<tr>
+        <td><code>${r.trigger_ts.substring(0,19)}</code></td>
+        <td><span class="badge bg-secondary">${r.trigger_source}</span></td>
+        <td class="small text-break">${r.trigger_raw}</td>
+        <td><span class="badge bg-${r.confidence==='HIGH'?'success':'warning text-dark'}">${r.confidence}</span></td>
+        <td><ul class="mb-0 ps-3">${ev}</ul></td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+  }
+  document.getElementById('testModalBody').innerHTML = html;
+}
+</script>
+{% endblock %}
