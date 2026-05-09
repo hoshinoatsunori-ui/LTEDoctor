@@ -91,3 +91,40 @@ rules:
         absent: true
     severity: medium
     diagnosis: "送信後 10秒以内に受信なし → サーバー無応答または中継ロスの疑い"
+
+  # ── 電流消費連携ルール ────────────────────────────────────────────────────────
+
+  - id: R-008
+    description: "リセット直前にラジオアクティブ電流（ブラウンアウト起因リセットの疑い）"
+    trigger:
+      event: EVT_RESET
+    conditions:
+      - source: current
+        event: EVT_RADIO_ACTIVE
+        within_ms: 5000
+    severity: high
+    diagnosis: "リセット直前にラジオアクティブ電流を検出 → 送受信中の電圧降下（ブラウンアウト）によるリセットの疑い。電源ラインのデカップリングを確認してください"
+
+  - id: R-009
+    description: "切断後に電流降下なし（即時再接続の疑い）"
+    trigger:
+      event: EVT_DETACH
+    conditions:
+      - source: current
+        event: EVT_CURRENT_DROP
+        within_ms: 5000
+        absent: true
+    severity: medium
+    diagnosis: "切断後 5秒以内に電流降下（スリープ移行）がない → デバイスが即時に再接続を試みている可能性。リセット多発と組み合わさると電力枯渇リスクあり"
+
+  - id: R-010
+    description: "長時間ラジオアクティブで接続成功なし（セル探索継続）"
+    trigger:
+      event: EVT_RADIO_ACTIVE
+    conditions:
+      - source: at
+        event: EVT_ATTACH
+        within_ms: 60000
+        absent: true
+    severity: medium
+    diagnosis: "60秒以上ラジオアクティブだが LTE 接続成功なし → セル探索が継続しており消費電力増大の疑い。電波環境または Band 設定を確認してください"

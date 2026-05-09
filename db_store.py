@@ -105,11 +105,22 @@ CREATE TABLE IF NOT EXISTS anchors (
     notes           TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_chip_utc  ON chipset_events(utc_ts_est);
-CREATE INDEX IF NOT EXISTS idx_at_utc    ON at_events(utc_ts_est);
-CREATE INDEX IF NOT EXISTS idx_chip_tick ON chipset_events(chip_tick_us);
-CREATE INDEX IF NOT EXISTS idx_pcap_utc  ON pcap_events(utc_ts);
-CREATE INDEX IF NOT EXISTS idx_corr_ts   ON correlated_events(trigger_ts);
+CREATE TABLE IF NOT EXISTS current_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    utc_ts      TEXT NOT NULL,
+    event_type  TEXT NOT NULL,
+    value_ma    REAL,
+    duration_s  REAL DEFAULT 0,
+    raw_text    TEXT,
+    source_file TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_chip_utc    ON chipset_events(utc_ts_est);
+CREATE INDEX IF NOT EXISTS idx_at_utc      ON at_events(utc_ts_est);
+CREATE INDEX IF NOT EXISTS idx_chip_tick   ON chipset_events(chip_tick_us);
+CREATE INDEX IF NOT EXISTS idx_pcap_utc    ON pcap_events(utc_ts);
+CREATE INDEX IF NOT EXISTS idx_corr_ts     ON correlated_events(trigger_ts);
+CREATE INDEX IF NOT EXISTS idx_current_utc ON current_events(utc_ts);
 """
 
 def _ts(dt: Optional[datetime]) -> Optional[str]:
@@ -179,6 +190,22 @@ class DiagDb:
         """, rows)
         self.conn.commit()
         logger.info("pcap_events: %d 件 挿入", len(rows))
+        return len(rows)
+
+    def insert_current(self, records: list) -> int:
+        """current_events に電流消費イベントを挿入する（otii_parser.CurrentEvent のリスト）。"""
+        rows = [
+            (r.utc_ts.isoformat(), r.event_type, r.value_ma,
+             r.duration_s, r.raw_text, r.source_file)
+            for r in records
+        ]
+        self.conn.executemany("""
+            INSERT INTO current_events
+            (utc_ts, event_type, value_ma, duration_s, raw_text, source_file)
+            VALUES (?,?,?,?,?,?)
+        """, rows)
+        self.conn.commit()
+        logger.info("current_events: %d 件 挿入", len(rows))
         return len(rows)
 
     def insert_correlated(self, rows: list[dict]) -> int:

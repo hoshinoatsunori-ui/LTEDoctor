@@ -25,14 +25,17 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # ── イベント種別定数 ───────────────────────────────────────────────
-EVT_ATTACH    = "EVT_ATTACH"
-EVT_DETACH    = "EVT_DETACH"
-EVT_TX        = "EVT_TX"
-EVT_RX        = "EVT_RX"
-EVT_PDN_ERROR = "EVT_PDN_ERROR"
-EVT_NWREJECT  = "EVT_NWREJECT"
-EVT_TIMEOUT   = "EVT_TIMEOUT"
-EVT_RESET     = "EVT_RESET"
+EVT_ATTACH        = "EVT_ATTACH"
+EVT_DETACH        = "EVT_DETACH"
+EVT_TX            = "EVT_TX"
+EVT_RX            = "EVT_RX"
+EVT_PDN_ERROR     = "EVT_PDN_ERROR"
+EVT_NWREJECT      = "EVT_NWREJECT"
+EVT_TIMEOUT       = "EVT_TIMEOUT"
+EVT_RESET         = "EVT_RESET"
+EVT_PEAK_CURRENT  = "EVT_PEAK_CURRENT"   # 短時間電流ピーク
+EVT_RADIO_ACTIVE  = "EVT_RADIO_ACTIVE"   # ラジオアクティブ区間
+EVT_CURRENT_DROP  = "EVT_CURRENT_DROP"   # スリープ移行
 
 # ── イベントレコード ──────────────────────────────────────────────
 @dataclass
@@ -136,6 +139,29 @@ def extract_events(conn) -> list[Event]:
             db_id=db_id2,
             extra={"nas_msg_type": nas_type, "emm_cause": emm_cause},
         ))
+
+    # ── 電流消費イベント ──
+    import sqlite3
+    try:
+        cur3 = conn.execute("""
+            SELECT id, utc_ts, event_type, value_ma, duration_s, raw_text
+            FROM current_events
+            WHERE utc_ts IS NOT NULL
+            ORDER BY utc_ts
+        """)
+        for row in cur3.fetchall():
+            db_id3, ts_s, ev_type, value_ma, duration_s, raw = row
+            try:
+                ts = datetime.fromisoformat(ts_s).replace(tzinfo=None)
+            except (ValueError, TypeError):
+                continue
+            events.append(Event(
+                ev_type, ts, "current", raw or "",
+                db_id=db_id3,
+                extra={"value_ma": value_ma, "duration_s": duration_s},
+            ))
+    except sqlite3.OperationalError:
+        pass  # current_events テーブルが未作成の古い DB はスキップ
 
     events.sort(key=lambda e: e.utc_ts)
     logger.info("イベント抽出: 計 %d 件", len(events))
