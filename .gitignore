@@ -20,3 +20,7 @@ logs/
 .env
 .venv/
 venv/
+
+# オフラインインストール用ホイールキャッシュ（再ダウンロード: pip download -r requirements.txt --dest lib）
+lib/*.whl
+lib/*.tar.gz

@@ -1,0 +1,25 @@
+# LTE Doctor - Python 依存ライブラリ
+# インストール: pip install -r requirements.txt
+# オフラインインストール: pip install --no-index --find-links=lib -r requirements.txt
+
+# Web ダッシュボード
+flask>=2.0
+
+# データ処理・信号解析
+pandas>=1.3
+numpy>=1.21
+
+# 設定ファイル
+pyyaml>=5.4
+
+# パケットキャプチャ解析
+scapy>=2.4
+
+# AI 診断（Claude API）
+anthropic>=0.50
+
+# 環境設定（.env 読み込み）
+python-dotenv>=1.0
+
+# オプション: tshark 連携による高精度 NAS デコード（なくても動作）
+# pyshark>=0.6

@@ -17,8 +17,12 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from dotenv import load_dotenv
+load_dotenv()   # プロジェクトルートの .env を自動読み込み
+
 import pandas as pd
 from flask import Flask, jsonify, render_template_string, request
+import anthropic
 
 # ── ロガー設定 ───────────────────────────────────────────────
 logging.basicConfig(
@@ -56,6 +60,9 @@ MAX_WAVEFORM_PTS = 5_000   # 表示点数上限（ウィンドウ幅に応じて
 # CSV メモリキャッシュ: {path: (mtime, df_with_datetime_index)}
 _csv_cache: dict = {}
 _CSV_CACHE_LIMIT = 4       # 最大保持ファイル数
+
+CLAUDE_MODEL   = "claude-sonnet-4-6"
+_chat_sessions: dict = {}   # chat_id -> {history, db_path, session_json}
 
 
 # ── ユーティリティ ────────────────────────────────────────────
@@ -343,6 +350,182 @@ def _load_events(db_path: str, t_lo: datetime, t_hi: datetime) -> list:
 
 
 # ── API ──────────────────────────────────────────────────────
+
+# ── AI Chat helpers ────────────────────────────────────────────────────────
+
+CHAT_TOOLS = [
+    {
+        "name": "query_database",
+        "description": "SQLiteデータベースに対してSELECTクエリを実行し、診断データを取得する。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query":       {"type": "string", "description": "実行するSELECT SQL文"},
+                "description": {"type": "string", "description": "このクエリで調べていること（日本語）"}
+            },
+            "required": ["query", "description"]
+        }
+    },
+    {
+        "name": "focus_timeline",
+        "description": "タイムライン表示を指定した時刻にフォーカスする。「この時刻を見せて」などの要求に使う。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "center_ts": {"type": "string", "description": "中心時刻 ISO形式 YYYY-MM-DDTHH:MM:SS"},
+                "window_s":  {"type": "integer", "description": "表示幅[秒]、デフォルト120"}
+            },
+            "required": ["center_ts"]
+        }
+    }
+]
+
+
+def _chat_system_prompt(session_json: dict, db_path: str) -> str:
+    counts = {}
+    try:
+        conn = sqlite3.connect(db_path)
+        for t in ["at_events", "pcap_events", "current_events", "chipset_events", "correlated_events"]:
+            try:
+                counts[t] = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            except Exception:
+                counts[t] = 0
+        conn.close()
+    except Exception:
+        pass
+
+    findings = session_json.get("findings", [])
+    f_summary = "\n".join(
+        f"  {f['rule_id']} [{f['severity'].upper()}]: {f.get('diagnosis','')[:70]}"
+        for f in findings[:8]
+    ) or "  なし"
+
+    return f"""あなたはLTE-Mモジュール（Sierra Wireless HL78xx / Sony ALT1250）の通信障害診断アシスタントです。
+SQLiteデータベースに対しSELECTクエリを実行してデータを調べ、エンジニアの質問に答えてください。
+
+## データベーススキーマ
+
+**at_events** (AT コマンドログ TX/RX)
+  id, abs_ts, rel_ms, direction(TX/RX), raw_text,
+  is_command, is_response, is_urc, is_ok, is_error, error_code,
+  utc_ts_est※, align_confidence
+  ※ utc_ts_est は PC ローカル時刻(JST)で格納されている場合があります
+
+**pcap_events** (Wireshark パケットキャプチャ)
+  id, frame_no, utc_ts(UTC), protocol, summary, nas_msg_type, emm_cause, event_type
+
+**current_events** (OTII 消費電流イベント)
+  id, utc_ts(UTC), event_type(EVT_PEAK_CURRENT/EVT_RADIO_ACTIVE/EVT_CURRENT_DROP),
+  value_ma, duration_s, raw_text
+
+**chipset_events** (チップセット UMAC ログ)
+  id, chip_tick_us, message, level, fsm_name, fsm_next_state,
+  is_boot_anchor, is_at_corr_anchor, utc_ts_est※, align_confidence
+
+**correlated_events** (診断ルール評価結果)
+  id, rule_id, severity, diagnosis, trigger_ts, trigger_source, trigger_raw, evidence, confidence
+
+## 現在のセッション
+- ログフォルダ: {session_json.get('log_folder','?')}
+- 診断日時: {session_json.get('created_at','')[:19]}
+- at_events: {counts.get('at_events','?')}件 / pcap_events: {counts.get('pcap_events','?')}件
+- current_events: {counts.get('current_events','?')}件 / chipset_events: {counts.get('chipset_events','?')}件
+
+## 自動診断ルール適合結果
+{f_summary}
+
+## 重要な注意
+- at_events.utc_ts_est は JST（UTC+9）の場合があります。pcap/current は UTC です
+- 時刻を比較する際: at の 17:14 ≒ pcap/current の 08:14（差9時間）
+- 確認された事実と推定原因を必ず区別して回答してください
+- 回答は日本語で行ってください"""
+
+
+def _exec_tool(name: str, inp: dict, db_path: str) -> str:
+    if name == "query_database":
+        q = inp.get("query", "").strip()
+        if not q.upper().lstrip().startswith("SELECT"):
+            return "エラー: SELECT クエリのみ実行できます。"
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(q).fetchmany(300)
+            if not rows:
+                conn.close()
+                return "結果: 0件"
+            cols  = list(rows[0].keys())
+            lines = [" | ".join(cols), "-" * max(len(" | ".join(cols)), 10)]
+            for r in rows:
+                lines.append(" | ".join("NULL" if v is None else str(v) for v in r))
+            try:
+                total = conn.execute(f"SELECT COUNT(*) FROM ({q}) _t").fetchone()[0]
+            except Exception:
+                total = len(rows)
+            conn.close()
+            out = "\n".join(lines)
+            if total > 300:
+                out += f"\n\n（全{total}件中 上位300件を表示）"
+            return out
+        except Exception as e:
+            return f"クエリエラー: {e}"
+
+    if name == "focus_timeline":
+        return json.dumps({"action": "focus_timeline",
+                           "center_ts": inp.get("center_ts"),
+                           "window_s":  inp.get("window_s", 120)})
+    return f"未知のツール: {name}"
+
+
+def _run_claude(messages: list, db_path: str, system: str) -> tuple:
+    """
+    Claude API を呼び出してツール使用ループを実行する。
+    Returns: (text_response, updated_messages, timeline_actions)
+    """
+    client     = anthropic.Anthropic()
+    tl_actions = []
+
+    while True:
+        resp = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=4096,
+            system=system,
+            tools=CHAT_TOOLS,
+            messages=messages,
+        )
+
+        if resp.stop_reason == "tool_use":
+            # ツール呼び出し結果を収集
+            tool_results = []
+            for blk in resp.content:
+                if blk.type == "tool_use":
+                    result = _exec_tool(blk.name, blk.input, db_path)
+                    # focus_timeline はフロントエンド向けに別途収集
+                    try:
+                        parsed = json.loads(result)
+                        if isinstance(parsed, dict) and parsed.get("action") == "focus_timeline":
+                            tl_actions.append(parsed)
+                    except Exception:
+                        pass
+                    tool_results.append({
+                        "type":        "tool_result",
+                        "tool_use_id": blk.id,
+                        "content":     result,
+                    })
+
+            messages = messages + [
+                {"role": "assistant", "content": resp.content},
+                {"role": "user",      "content": tool_results},
+            ]
+            continue  # 次のターンへ
+
+        # stop_reason == "end_turn"
+        text = "".join(
+            blk.text for blk in resp.content
+            if hasattr(blk, "text")
+        )
+        messages = messages + [{"role": "assistant", "content": resp.content}]
+        return text, messages, tl_actions
+
 
 @app.route("/")
 def index():
@@ -703,6 +886,50 @@ body {
 }
 #chart-panel { position: relative; }
 
+/* ── Tab 4: AI Chat ── */
+#tab-chat { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+#chat-toolbar {
+  flex-shrink: 0; padding: 8px 14px; background: var(--mantle);
+  border-bottom: 1px solid var(--surface0);
+  display: flex; align-items: center; gap: 10px;
+}
+#chat-session-label { font-size: 0.8rem; color: var(--overlay0); flex: 1; }
+#chat-messages {
+  flex: 1; overflow-y: auto; padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.chat-bubble {
+  max-width: 85%; padding: 10px 14px; border-radius: 10px;
+  font-size: 0.85rem; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+}
+.bubble-user {
+  align-self: flex-end;
+  background: var(--blue); color: var(--crust); border-radius: 10px 10px 2px 10px;
+}
+.bubble-ai {
+  align-self: flex-start;
+  background: var(--surface0); color: var(--text); border-radius: 10px 10px 10px 2px;
+}
+.bubble-ai code { background: var(--crust); padding: 1px 4px; border-radius: 3px; font-size: 0.8rem; }
+.bubble-system { align-self: center; color: var(--overlay0); font-size: 0.78rem; font-style: italic; }
+.rule-proposal {
+  border: 1px solid var(--surface1); border-radius: 8px;
+  padding: 10px 14px; background: var(--mantle); margin-top: 8px;
+}
+.rule-proposal pre { background: var(--crust); padding: 8px; border-radius: 4px; font-size: 0.76rem; overflow-x: auto; }
+.rule-proposal-btns { display: flex; gap: 8px; margin-top: 8px; }
+#chat-input-row {
+  flex-shrink: 0; display: flex; gap: 8px; padding: 10px 14px;
+  background: var(--mantle); border-top: 1px solid var(--surface0);
+}
+#chat-input {
+  flex: 1; background: var(--surface0); border: 1px solid var(--surface1);
+  color: var(--text); padding: 8px 12px; border-radius: 6px;
+  font-size: 0.88rem; resize: none; height: 38px; outline: none;
+}
+#chat-input:focus { border-color: var(--blue); }
+#chat-thinking { display: none; align-self: flex-start; color: var(--overlay0); font-size: 0.8rem; font-style: italic; }
+
 /* 所見アイテム内トリガ時刻 */
 .finding-ts {
   font-size: 0.7rem; color: var(--teal);
@@ -772,6 +999,7 @@ body {
     <button class="tab-btn active" onclick="switchTab('setup')">① 診断設定</button>
     <button class="tab-btn" onclick="switchTab('sessions')">② セッション一覧</button>
     <button class="tab-btn" onclick="switchTab('timeline')">③ タイムライン</button>
+    <button class="tab-btn" onclick="switchTab('chat')">④ AI診断</button>
   </div>
 </div>
 
@@ -852,6 +1080,23 @@ body {
   </div>
 </div>
 
+<!-- ────────────── Tab 4: AI Chat ────────────── -->
+<div id="tab-chat" class="tab-panel">
+  <div id="chat-toolbar">
+    <span id="chat-session-label">セッション未選択 — タイムラインでセッションを開いてください</span>
+    <button class="btn btn-secondary" style="font-size:0.78rem;padding:5px 12px"
+      onclick="chatSaveReport()" id="chat-report-btn" style="display:none">レポートを保存</button>
+  </div>
+  <div id="chat-messages">
+    <div class="bubble-system">タイムラインでセッションを開くと、AI診断が使えます。</div>
+  </div>
+  <div id="chat-input-row">
+    <textarea id="chat-input" placeholder="質問を入力...（Shift+Enter で改行、Enter で送信）"
+      onkeydown="chatKeyDown(event)"></textarea>
+    <button class="btn btn-primary" onclick="chatSend()" id="chat-send-btn">送信</button>
+  </div>
+</div>
+
 <script>
 // ══════════════════════════════════════════════════════
 //  グローバル状態
@@ -879,7 +1124,7 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
-  const idx = { setup: 0, sessions: 1, timeline: 2 }[name];
+  const idx = { setup: 0, sessions: 1, timeline: 2, chat: 3 }[name];
   document.querySelectorAll('.tab-btn')[idx].classList.add('active');
   if (name === 'sessions') loadSessions();
 }
@@ -1042,6 +1287,8 @@ async function openSession(sessionId) {
   document.getElementById('tl-empty').style.display = 'none';
   document.getElementById('tl-chart').style.display = 'block';
   await loadFullSession();
+  // Tab ④ AI Chat を自動初期化（バックグラウンドで）
+  initChat(sessionId);
 }
 
 // ══════════════════════════════════════════════════════
@@ -1385,9 +1632,459 @@ function toJST(isoStr) {
 
 // 初期化
 loadSessions();
+
+// ══════════════════════════════════════════════════════
+//  Tab 4: AI Chat
+// ══════════════════════════════════════════════════════
+let chatId = null;
+let chatSessionId = null;
+let chatBusy = false;
+
+async function initChat(sessionId) {
+  if (chatSessionId === sessionId && chatId) return;  // already initialized
+  chatSessionId = sessionId;
+  chatId = null;
+  const msgs = document.getElementById('chat-messages');
+  msgs.innerHTML = '<div class="bubble-system">接続中...</div>';
+
+  // API キー確認
+  try {
+    const kr = await fetch('/api/chat/check_key');
+    const kd = await kr.json();
+    if (!kd.ok) {
+      msgs.innerHTML =
+        '<div class="bubble-system" style="color:var(--red)">' +
+        '⚠ ANTHROPIC_API_KEY が設定されていません。<br>' +
+        '環境変数 ANTHROPIC_API_KEY に Claude API キーを設定してサーバーを再起動してください。<br>' +
+        '<a href="https://console.anthropic.com/" target="_blank" style="color:var(--blue)">API キーの取得 →</a>' +
+        '</div>';
+      return;
+    }
+  } catch(e) { /* ネットワークエラーはスキップ */ }
+
+  try {
+    const res  = await fetch('/api/chat/start', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({session_id: sessionId})
+    });
+    const data = await res.json();
+    if (data.error) { msgs.innerHTML = '<div class="bubble-system">エラー: ' + esc(data.error) + '</div>'; return; }
+    chatId = data.chat_id;
+    msgs.innerHTML = '';
+    appendBubble('ai', data.greeting);
+    document.getElementById('chat-session-label').textContent = 'セッション: ' + sessionId;
+    document.getElementById('chat-report-btn').style.display = 'inline-block';
+  } catch(e) {
+    msgs.innerHTML = '<div class="bubble-system">接続エラー: ' + esc(String(e)) + '</div>';
+  }
+}
+
+function chatKeyDown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatSend(); }
+}
+
+async function chatSend() {
+  if (chatBusy || !chatId) return;
+  const input = document.getElementById('chat-input');
+  const msg   = input.value.trim();
+  if (!msg) return;
+
+  input.value = '';
+  appendBubble('user', msg);
+  chatBusy = true;
+  document.getElementById('chat-send-btn').disabled = true;
+  appendThinking();
+
+  // ルール化の要求を検出
+  const isRuleReq = /ルール化|ルールにして|ルールを(作|追加|保存)/.test(msg);
+
+  try {
+    const res  = await fetch('/api/chat/message', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({chat_id: chatId, message: msg})
+    });
+    const data = await res.json();
+    removeThinking();
+
+    if (data.error) { appendBubble('ai', 'エラー: ' + data.error); }
+    else {
+      appendBubble('ai', data.response);
+      // タイムライン連動
+      (data.timeline_actions || []).forEach(a => {
+        if (a.action === 'focus_timeline' && currentSessionId) {
+          if (typeof Plotly !== 'undefined') {
+            const c = new Date(a.center_ts + 'Z');
+            const h = (a.window_s || 120) * 500;
+            Plotly.relayout('tl-chart', {'xaxis.range': [
+              new Date(c - h).toISOString().slice(0,23),
+              new Date(c + h).toISOString().slice(0,23)
+            ]});
+          }
+          appendBubble('system', 'タイムライン: ' + a.center_ts + ' ±' + (a.window_s||120) + '秒 にフォーカスしました');
+        }
+      });
+      // ルール化要求への対応
+      if (isRuleReq) setTimeout(() => chatProposeRule(msg), 300);
+    }
+  } catch(e) {
+    removeThinking();
+    appendBubble('ai', '通信エラー: ' + e);
+  }
+  chatBusy = false;
+  document.getElementById('chat-send-btn').disabled = false;
+}
+
+async function chatProposeRule(hint) {
+  if (!chatId) return;
+  appendBubble('system', 'ルール候補を生成中...');
+  try {
+    const res  = await fetch('/api/chat/rule', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({chat_id: chatId, hint})
+    });
+    const data = await res.json();
+    if (data.error) { appendBubble('ai', 'ルール生成エラー: ' + data.error); return; }
+
+    const msgs = document.getElementById('chat-messages');
+    const div  = document.createElement('div');
+    div.className = 'bubble-ai';
+    div.innerHTML =
+      '<div style="font-size:0.8rem;color:var(--teal);margin-bottom:6px">提案ルール ' + esc(data.suggested_id) + '</div>' +
+      '<div class="rule-proposal">' +
+        '<pre>' + esc(data.rule_yaml) + '</pre>' +
+        '<div style="font-size:0.78rem;color:var(--subtext);margin-top:6px">' + esc(data.reason.slice(0,300)) + '</div>' +
+        '<div class="rule-proposal-btns">' +
+          '<button class="btn btn-primary" style="font-size:0.78rem;padding:5px 12px" ' +
+            'onclick="chatSaveRule(' + JSON.stringify(data.rule_yaml).replace(/"/g,"&quot;") + ',this)">確定して追加</button>' +
+          '<button class="btn btn-secondary" style="font-size:0.78rem;padding:5px 12px" ' +
+            'onclick="this.closest(\'.rule-proposal\').querySelector(\'.rule-proposal-btns\').innerHTML=\'<span style=color:var(--overlay0)>却下しました</span>\'">却下</button>' +
+        '</div>' +
+      '</div>';
+    msgs.appendChild(div);
+    msgs.scrollTop = msgs.scrollHeight;
+  } catch(e) {
+    appendBubble('ai', 'ルール生成エラー: ' + e);
+  }
+}
+
+async function chatSaveRule(ruleYaml, btn) {
+  btn.disabled = true;
+  btn.textContent = '保存中...';
+  try {
+    const res  = await fetch('/api/chat/rule/save', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({rule_yaml: ruleYaml})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      btn.textContent = '✓ rules.yaml に追加しました';
+      btn.style.background = 'var(--green)';
+      appendBubble('system', 'ルールを rules.yaml に追加しました。次回の診断から適用されます。');
+    } else {
+      btn.textContent = 'エラー: ' + (data.error || '不明');
+    }
+  } catch(e) {
+    btn.textContent = 'エラー: ' + e;
+  }
+}
+
+async function chatSaveReport() {
+  if (!chatId) return;
+  const btn = document.getElementById('chat-report-btn');
+  btn.textContent = '生成中...';
+  btn.disabled = true;
+  try {
+    const res  = await fetch('/api/chat/report', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({chat_id: chatId})
+    });
+    const data = await res.json();
+    if (data.error) { alert(data.error); }
+    else {
+      appendBubble('system', 'レポートを保存しました: ' + data.saved_as);
+      appendBubble('ai', data.report.slice(0, 800) + (data.report.length > 800 ? '\n\n（続き省略）' : ''));
+    }
+  } catch(e) { alert('エラー: ' + e); }
+  btn.textContent = 'レポートを保存';
+  btn.disabled = false;
+}
+
+function appendBubble(role, text) {
+  const msgs = document.getElementById('chat-messages');
+  const div  = document.createElement('div');
+  div.className = role === 'user' ? 'chat-bubble bubble-user' :
+                  role === 'ai'   ? 'chat-bubble bubble-ai' : 'bubble-system';
+  div.textContent = text;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function appendThinking() {
+  const msgs = document.getElementById('chat-messages');
+  const div  = document.createElement('div');
+  div.id = 'chat-thinking-bubble';
+  div.className = 'bubble-system';
+  div.textContent = '考え中...';
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function removeThinking() {
+  const el = document.getElementById('chat-thinking-bubble');
+  if (el) el.remove();
+}
 </script>
 </body>
 </html>"""
+
+
+# ── AI Chat API ───────────────────────────────────────────────────────────
+
+@app.route("/api/chat/check_key")
+def api_chat_check_key():
+    """ANTHROPIC_API_KEY が設定されているか確認する。"""
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if key:
+        return jsonify({"ok": True, "hint": f"設定済み（...{key[-4:]}）"})
+    return jsonify({"ok": False, "hint": "ANTHROPIC_API_KEY が設定されていません"})
+
+
+@app.route("/api/chat/start", methods=["POST"])
+def api_chat_start():
+    """チャットセッションを開始する。"""
+    session_id = (request.json or {}).get("session_id", "")
+    json_path  = os.path.join(SESSIONS_DIR, f"session_{session_id}.json")
+    if not os.path.isfile(json_path):
+        return jsonify({"error": "セッションが見つかりません"}), 404
+
+    with open(json_path, encoding="utf-8") as f:
+        session_json = json.load(f)
+
+    db_path = session_json.get("db_path", "")
+    if not os.path.isfile(db_path):
+        return jsonify({"error": "DB ファイルが見つかりません"}), 404
+
+    chat_id = uuid.uuid4().hex[:12]
+    system  = _chat_system_prompt(session_json, db_path)
+
+    # 初期メッセージを Claude に生成させる
+    init_msg = [{
+        "role": "user",
+        "content": "セッションデータが読み込まれました。データの概要を簡潔に説明し、どのような調査ができるか案内してください。"
+    }]
+    try:
+        greeting, history, _ = _run_claude(init_msg, db_path, system)
+    except Exception as e:
+        msg = str(e)
+        if "api_key" in msg or "authentication" in msg.lower() or "ANTHROPIC_API_KEY" in msg:
+            msg = "ANTHROPIC_API_KEY が設定されていません。環境変数を設定してサーバーを再起動してください。"
+        return jsonify({"error": f"Claude API エラー: {msg}"}), 500
+
+    _chat_sessions[chat_id] = {
+        "session_id":   session_id,
+        "session_json": session_json,
+        "db_path":      db_path,
+        "system":       system,
+        "history":      history,
+    }
+    return jsonify({"chat_id": chat_id, "greeting": greeting})
+
+
+@app.route("/api/chat/message", methods=["POST"])
+def api_chat_message():
+    """ユーザーメッセージを送信して Claude の回答を得る。"""
+    data    = request.json or {}
+    chat_id = data.get("chat_id", "")
+    message = (data.get("message") or "").strip()
+
+    if not chat_id or chat_id not in _chat_sessions:
+        return jsonify({"error": "チャットセッションが見つかりません"}), 404
+    if not message:
+        return jsonify({"error": "メッセージが空です"}), 400
+
+    sess    = _chat_sessions[chat_id]
+    history = sess["history"] + [{"role": "user", "content": message}]
+
+    try:
+        text, history, tl_actions = _run_claude(history, sess["db_path"], sess["system"])
+    except Exception as e:
+        msg = str(e)
+        if "api_key" in msg or "authentication" in msg.lower():
+            msg = "ANTHROPIC_API_KEY が設定されていません。環境変数を設定してサーバーを再起動してください。"
+        logger.exception("Claude API エラー")
+        return jsonify({"error": msg}), 500
+    except Exception as e:
+        logger.exception("Claude API エラー")
+        return jsonify({"error": f"AI エラー: {e}"}), 500
+
+    sess["history"] = history
+    return jsonify({"response": text, "timeline_actions": tl_actions})
+
+
+@app.route("/api/chat/report", methods=["POST"])
+def api_chat_report():
+    """Q&A 履歴からレポートを生成して保存する。"""
+    chat_id = (request.json or {}).get("chat_id", "")
+    if chat_id not in _chat_sessions:
+        return jsonify({"error": "チャットセッションが見つかりません"}), 404
+
+    sess = _chat_sessions[chat_id]
+    # 会話をテキスト化して Claude にレポート生成を依頼
+    conv_text = "\n\n".join(
+        f"[{'エンジニア' if m['role']=='user' else 'AI'}]\n"
+        + (m["content"] if isinstance(m["content"], str) else str(m["content"]))
+        for m in sess["history"]
+        if isinstance(m.get("content"), str)
+    )
+    prompt = f"""以下のQ&A対話記録をもとに、診断レポートを日本語Markdown形式で生成してください。
+
+## 対話記録
+{conv_text[:8000]}
+
+## レポート形式（必ずこの見出し構成で出力してください）
+# 診断調査レポート
+**調査日時**: （現在時刻をJSTで）
+**対象セッション**: {sess['session_id']}
+**ログフォルダ**: {sess['session_json'].get('log_folder','')}
+
+## 調査概要
+（何を調べたかを2〜3文で）
+
+## 主要発見
+（箇条書きで事実ベースの発見を列挙。確認された事実と推定を明確に区別すること）
+
+## 根拠データ
+（発見を支持するクエリ結果・イベント・数値を記載）
+
+## 結論・推定原因
+（最も可能性の高い原因と根拠）
+
+## 推奨アクション
+（次に取るべき調査や対処）
+
+## Q&A ログ
+（全対話を Q:/A: 形式で記載）"""
+
+    try:
+        client = anthropic.Anthropic()
+        resp   = client.messages.create(
+            model=CLAUDE_MODEL, max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        report_md = resp.content[0].text
+    except Exception as e:
+        return jsonify({"error": f"レポート生成エラー: {e}"}), 500
+
+    _jst      = timezone(timedelta(hours=9))
+    ts_str    = datetime.now(_jst).strftime("%Y%m%d_%H%M%S")
+    filename  = f"session_{sess['session_id']}_report_{ts_str}.md"
+    save_path = os.path.join(SESSIONS_DIR, filename)
+    with open(save_path, "w", encoding="utf-8") as f:
+        f.write(report_md)
+
+    return jsonify({"report": report_md, "saved_as": filename})
+
+
+@app.route("/api/chat/rule", methods=["POST"])
+def api_chat_rule():
+    """Q&A 履歴から診断ルールの YAML を提案する。"""
+    data    = request.json or {}
+    chat_id = data.get("chat_id", "")
+    hint    = data.get("hint", "")   # ユーザーが「ルール化して」と言った文脈
+
+    if chat_id not in _chat_sessions:
+        return jsonify({"error": "チャットセッションが見つかりません"}), 404
+
+    sess = _chat_sessions[chat_id]
+    conv_text = "\n\n".join(
+        f"[{'エンジニア' if m['role']=='user' else 'AI'}]\n"
+        + (m["content"] if isinstance(m["content"], str) else "")
+        for m in sess["history"]
+        if isinstance(m.get("content"), str)
+    )
+
+    # 既存ルール ID を取得
+    rules_path = os.path.join(os.path.dirname(__file__), "rules.yaml")
+    existing_ids = []
+    try:
+        import yaml
+        with open(rules_path, encoding="utf-8") as f:
+            existing_rules = yaml.safe_load(f).get("rules", [])
+        existing_ids = [r["id"] for r in existing_rules]
+    except Exception:
+        pass
+
+    next_id = f"R-{len(existing_ids)+1:03d}"
+
+    prompt = f"""以下のQ&A対話記録で発見された障害パターンを、LTE Doctor の rules.yaml 形式の診断ルールとして提案してください。
+
+## 対話記録
+{conv_text[:6000]}
+
+## ユーザーの意図
+{hint}
+
+## 既存ルール ID（重複禁止）
+{existing_ids}
+
+## 出力形式（YAMLブロックのみ出力。説明文は ### の後に記載）
+```yaml
+- id: {next_id}
+  description: "（パターンの説明）"
+  trigger:
+    event: EVT_*
+    count: 1          # 不要なら削除
+    window_ms: 30000  # 不要なら削除
+  conditions:
+    - source: at|pcap|current|any
+      event: EVT_*
+      within_ms: 5000
+      absent: false
+  severity: critical|high|medium|low
+  diagnosis: "（根拠と推奨アクション）"
+```
+
+### 提案理由
+（なぜこのルールを提案するか。発見した根拠を述べること）"""
+
+    try:
+        client = anthropic.Anthropic()
+        resp   = client.messages.create(
+            model=CLAUDE_MODEL, max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = resp.content[0].text
+    except Exception as e:
+        return jsonify({"error": f"ルール生成エラー: {e}"}), 500
+
+    # YAML ブロックを抽出
+    import re
+    m = re.search(r"```ya?ml\s*([\s\S]*?)```", raw)
+    rule_yaml = m.group(1).strip() if m else raw.strip()
+    # 説明文を抽出
+    reason = re.sub(r"```[\s\S]*?```", "", raw).strip()
+
+    return jsonify({"rule_yaml": rule_yaml, "reason": reason, "suggested_id": next_id})
+
+
+@app.route("/api/chat/rule/save", methods=["POST"])
+def api_chat_rule_save():
+    """提案されたルールを rules.yaml に追記する。"""
+    data      = request.json or {}
+    rule_yaml = (data.get("rule_yaml") or "").strip()
+    if not rule_yaml:
+        return jsonify({"error": "ルール YAML が空です"}), 400
+
+    rules_path = os.path.join(os.path.dirname(__file__), "rules.yaml")
+    try:
+        with open(rules_path, "a", encoding="utf-8") as f:
+            f.write("\n\n  # --- AI 提案ルール（自動追加）---\n")
+            for line in rule_yaml.splitlines():
+                f.write(f"  {line}\n")
+    except Exception as e:
+        return jsonify({"error": f"保存エラー: {e}"}), 500
+
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
